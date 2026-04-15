@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "STRIPE_SECRET_KEY": "sk_test_...",
+    "STRIPE_WEBHOOK_SECRET": "whsec_...",
+    "SENDGRID_API_KEY": "SG...",
+    "FROM_EMAIL": "info@gwfbob.org",
+    "FROM_NAME": "Global Women Foundation & Band of Brothers"
+  }
+}
