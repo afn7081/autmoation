@@ -176,7 +176,7 @@ def stripe_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
     return func.HttpResponse(json.dumps({"status": "ok"}), status_code=200)
 
-
+# making a change
 # ── Health Check ─────────────────────────────────────────────────────────────
 
 @app.route(route="health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
