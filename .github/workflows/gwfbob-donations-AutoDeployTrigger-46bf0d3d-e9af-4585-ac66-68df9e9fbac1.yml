@@ -1,0 +1,49 @@
+name: Trigger auto deployment for gwfbob-donations
+
+# When this action will be executed
+on:
+  # Automatically trigger it when detected changes in repo
+  push:
+    branches: 
+      [ mai ]
+    paths:
+    - '**'
+    - '.github/workflows/gwfbob-donations-AutoDeployTrigger-46bf0d3d-e9af-4585-ac66-68df9e9fbac1.yml'
+
+  # Allow manual trigger 
+  workflow_dispatch:      
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions: 
+      id-token: write #This is required for requesting the OIDC JWT Token
+      contents: read #Required when GH token is used to authenticate with private repo
+
+    steps:
+      - name: Checkout to the branch
+        uses: actions/checkout@v2
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.GWFBOBDONATIONS_AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.GWFBOBDONATIONS_AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.GWFBOBDONATIONS_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push container image to registry
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          appSourcePath: ${{ github.workspace }}
+          _dockerfilePathKey_: _dockerfilePath_
+          _targetLabelKey_: _targetLabel_
+          registryUrl: gwfbobacr.azurecr.io
+          registryUsername: ${{ secrets.GWFBOBDONATIONS_REGISTRY_USERNAME }}
+          registryPassword: ${{ secrets.GWFBOBDONATIONS_REGISTRY_PASSWORD }}
+          containerAppName: gwfbob-donations
+          resourceGroup: gwfbob-rg
+          imageToBuild: gwfbobacr.azurecr.io/gwfbob-donations:${{ github.sha }}
+          _buildArgumentsKey_: |
+            _buildArgumentsValues_
+
+
