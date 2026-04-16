@@ -3,3 +3,19 @@ __pycache__/
 *.pyc
 test_*
 .git/
+~$*
+
+# OAuth setup script - only needed locally
+canva_oauth_setup.py
+
+# Large design files not needed at runtime
+CERTIFICATE OF RECOGNITION.svg
+CERTIFICATE OF RECOGNITION.html
+CERTIFICATE OF RECOGNITION_files/
+certificate_template.html
+cert_preview.html
+Blue and Gold Modern Achievement Certificate.pptx
+
+# Dev/doc files
+inspect_cert.py
+md_to_pdf.py
