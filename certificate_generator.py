@@ -70,42 +70,54 @@ def generate_certificate_png(donor_name, date=""):
     file_size = os.path.getsize(CERTIFICATE_TEMPLATE)
     logging.info(f"Template file: {CERTIFICATE_TEMPLATE} ({file_size} bytes)")
 
-    # Step 2: Copy template and convert from legacy .ppt (OLE2) to .pptx if needed
+    # Step 2: Get a valid PPTX template (convert from legacy PPT if needed)
     import zipfile
-    import subprocess
 
-    tpl_path = os.path.join(tempfile.gettempdir(), "cert_input.pptx")
+    tpl_path = os.path.join(tempfile.gettempdir(), "cert_template_converted.pptx")
 
-    if zipfile.is_zipfile(CERTIFICATE_TEMPLATE):
+    # Use cached conversion if available
+    if os.path.exists(tpl_path) and zipfile.is_zipfile(tpl_path):
+        logging.info("Using cached converted PPTX template.")
+    elif zipfile.is_zipfile(CERTIFICATE_TEMPLATE):
         # Already a valid PPTX — just copy
         with open(CERTIFICATE_TEMPLATE, "rb") as src, open(tpl_path, "wb") as dst:
             dst.write(src.read())
         logging.info("Template is valid PPTX, copied directly.")
     else:
-        # Legacy OLE2 format — convert with LibreOffice at runtime
-        logging.warning("Template is not a valid ZIP/PPTX (legacy format). Converting with LibreOffice...")
-        ppt_path = os.path.join(tempfile.gettempdir(), "cert_input.ppt")
-        with open(CERTIFICATE_TEMPLATE, "rb") as src, open(ppt_path, "wb") as dst:
-            dst.write(src.read())
+        # Legacy OLE2 format — convert via ConvertAPI (ppt → pptx)
+        logging.warning("Template is legacy PPT format. Converting via ConvertAPI...")
+        with open(CERTIFICATE_TEMPLATE, "rb") as f:
+            conv_resp = requests.post(
+                f"https://v2.convertapi.com/convert/ppt/to/pptx?Secret={api_secret}",
+                files={"File": ("template.ppt", f, "application/vnd.ms-powerpoint")},
+                timeout=120,
+            )
+        if conv_resp.status_code != 200:
+            raise RuntimeError(f"ConvertAPI PPT→PPTX failed ({conv_resp.status_code}): {conv_resp.text}")
 
-        result = subprocess.run(
-            ["libreoffice", "--headless", "--norestore", "--convert-to", "pptx",
-             ppt_path, "--outdir", tempfile.gettempdir()],
-            capture_output=True, text=True, timeout=120,
-            env={**os.environ, "HOME": "/tmp"}
-        )
-        logging.info(f"LibreOffice stdout: {result.stdout}")
-        if result.returncode != 0:
-            logging.error(f"LibreOffice stderr: {result.stderr}")
-            raise RuntimeError(f"LibreOffice conversion failed (exit {result.returncode}): {result.stderr}")
+        conv_result = conv_resp.json()
+        conv_files = conv_result.get("Files", [])
+        if not conv_files:
+            raise RuntimeError(f"ConvertAPI PPT→PPTX returned no files: {conv_result}")
 
-        if not os.path.exists(tpl_path) or not zipfile.is_zipfile(tpl_path):
-            raise RuntimeError(
-                f"LibreOffice conversion did not produce a valid PPTX. "
-                f"File exists: {os.path.exists(tpl_path)}")
-        logging.info("Template converted to PPTX successfully.")
+        # Download the converted PPTX
+        pptx_url = conv_files[0]["Url"]
+        pptx_resp = requests.get(pptx_url, timeout=60)
+        pptx_resp.raise_for_status()
 
-    prs = Presentation(tpl_path)
+        with open(tpl_path, "wb") as dst:
+            dst.write(pptx_resp.content)
+
+        if not zipfile.is_zipfile(tpl_path):
+            raise RuntimeError("ConvertAPI conversion result is not a valid PPTX")
+        logging.info(f"Template converted to PPTX successfully ({len(pptx_resp.content)} bytes).")
+
+    # Make a working copy for this invocation
+    work_path = os.path.join(tempfile.gettempdir(), "cert_input.pptx")
+    with open(tpl_path, "rb") as src, open(work_path, "wb") as dst:
+        dst.write(src.read())
+
+    prs = Presentation(work_path)
     for slide in prs.slides:
         for shape in slide.shapes:
             if not shape.has_text_frame:
@@ -144,6 +156,6 @@ def generate_certificate_png(donor_name, date=""):
         return png_resp.content
 
     finally:
-        for p in [tmp_path, tpl_path]:
+        for p in [tmp_path, work_path]:
             if os.path.exists(p):
                 os.remove(p)
