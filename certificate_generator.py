@@ -70,18 +70,40 @@ def generate_certificate_png(donor_name, date=""):
     file_size = os.path.getsize(CERTIFICATE_TEMPLATE)
     logging.info(f"Template file: {CERTIFICATE_TEMPLATE} ({file_size} bytes)")
 
-    # Step 2: Copy template using raw file I/O to a simple temp path
-    tpl_path = os.path.join(tempfile.gettempdir(), "cert_input.pptx")
-    with open(CERTIFICATE_TEMPLATE, "rb") as src, open(tpl_path, "wb") as dst:
-        dst.write(src.read())
-
-    copied_size = os.path.getsize(tpl_path)
-    logging.info(f"Template copied to: {tpl_path} ({copied_size} bytes)")
-
-    # Verify the copy is a valid ZIP
+    # Step 2: Copy template and convert from legacy .ppt (OLE2) to .pptx if needed
     import zipfile
-    if not zipfile.is_zipfile(tpl_path):
-        raise ValueError(f"Copied file is not a valid ZIP/PPTX: {tpl_path}")
+    import subprocess
+
+    tpl_path = os.path.join(tempfile.gettempdir(), "cert_input.pptx")
+
+    if zipfile.is_zipfile(CERTIFICATE_TEMPLATE):
+        # Already a valid PPTX — just copy
+        with open(CERTIFICATE_TEMPLATE, "rb") as src, open(tpl_path, "wb") as dst:
+            dst.write(src.read())
+        logging.info("Template is valid PPTX, copied directly.")
+    else:
+        # Legacy OLE2 format — convert with LibreOffice at runtime
+        logging.warning("Template is not a valid ZIP/PPTX (legacy format). Converting with LibreOffice...")
+        ppt_path = os.path.join(tempfile.gettempdir(), "cert_input.ppt")
+        with open(CERTIFICATE_TEMPLATE, "rb") as src, open(ppt_path, "wb") as dst:
+            dst.write(src.read())
+
+        result = subprocess.run(
+            ["libreoffice", "--headless", "--norestore", "--convert-to", "pptx",
+             ppt_path, "--outdir", tempfile.gettempdir()],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "HOME": "/tmp"}
+        )
+        logging.info(f"LibreOffice stdout: {result.stdout}")
+        if result.returncode != 0:
+            logging.error(f"LibreOffice stderr: {result.stderr}")
+            raise RuntimeError(f"LibreOffice conversion failed (exit {result.returncode}): {result.stderr}")
+
+        if not os.path.exists(tpl_path) or not zipfile.is_zipfile(tpl_path):
+            raise RuntimeError(
+                f"LibreOffice conversion did not produce a valid PPTX. "
+                f"File exists: {os.path.exists(tpl_path)}")
+        logging.info("Template converted to PPTX successfully.")
 
     prs = Presentation(tpl_path)
     for slide in prs.slides:

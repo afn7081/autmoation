@@ -18,10 +18,3 @@ COPY requirements.txt /home/site/wwwroot/
 RUN pip install --no-cache-dir -r /home/site/wwwroot/requirements.txt
 
 COPY . /home/site/wwwroot
-
-# Convert legacy .ppt/.doc format (OLE2) to real .pptx (OOXML)
-RUN cd /home/site/wwwroot && \
-    mv cert_template.pptx cert_template.ppt && \
-    HOME=/tmp libreoffice --headless --norestore --convert-to pptx cert_template.ppt --outdir /home/site/wwwroot && \
-    python -c "import zipfile; assert zipfile.is_zipfile('cert_template.pptx'), 'Conversion failed: still not a valid PPTX'" && \
-    rm -f cert_template.ppt
