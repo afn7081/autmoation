@@ -70,54 +70,8 @@ def generate_certificate_png(donor_name, date=""):
     file_size = os.path.getsize(CERTIFICATE_TEMPLATE)
     logging.info(f"Template file: {CERTIFICATE_TEMPLATE} ({file_size} bytes)")
 
-    # Step 2: Get a valid PPTX template (convert from legacy PPT if needed)
-    import zipfile
-
-    tpl_path = os.path.join(tempfile.gettempdir(), "cert_template_converted.pptx")
-
-    # Use cached conversion if available
-    if os.path.exists(tpl_path) and zipfile.is_zipfile(tpl_path):
-        logging.info("Using cached converted PPTX template.")
-    elif zipfile.is_zipfile(CERTIFICATE_TEMPLATE):
-        # Already a valid PPTX — just copy
-        with open(CERTIFICATE_TEMPLATE, "rb") as src, open(tpl_path, "wb") as dst:
-            dst.write(src.read())
-        logging.info("Template is valid PPTX, copied directly.")
-    else:
-        # Legacy OLE2 format — convert via ConvertAPI (ppt → pptx)
-        logging.warning("Template is legacy PPT format. Converting via ConvertAPI...")
-        with open(CERTIFICATE_TEMPLATE, "rb") as f:
-            conv_resp = requests.post(
-                f"https://v2.convertapi.com/convert/ppt/to/pptx?Secret={api_secret}",
-                files={"File": ("template.ppt", f, "application/vnd.ms-powerpoint")},
-                timeout=120,
-            )
-        if conv_resp.status_code != 200:
-            raise RuntimeError(f"ConvertAPI PPT→PPTX failed ({conv_resp.status_code}): {conv_resp.text}")
-
-        conv_result = conv_resp.json()
-        conv_files = conv_result.get("Files", [])
-        if not conv_files:
-            raise RuntimeError(f"ConvertAPI PPT→PPTX returned no files: {conv_result}")
-
-        # Download the converted PPTX
-        pptx_url = conv_files[0]["Url"]
-        pptx_resp = requests.get(pptx_url, timeout=60)
-        pptx_resp.raise_for_status()
-
-        with open(tpl_path, "wb") as dst:
-            dst.write(pptx_resp.content)
-
-        if not zipfile.is_zipfile(tpl_path):
-            raise RuntimeError("ConvertAPI conversion result is not a valid PPTX")
-        logging.info(f"Template converted to PPTX successfully ({len(pptx_resp.content)} bytes).")
-
-    # Make a working copy for this invocation
-    work_path = os.path.join(tempfile.gettempdir(), "cert_input.pptx")
-    with open(tpl_path, "rb") as src, open(work_path, "wb") as dst:
-        dst.write(src.read())
-
-    prs = Presentation(work_path)
+    # Step 2: Open template and replace placeholders
+    prs = Presentation(CERTIFICATE_TEMPLATE)
     for slide in prs.slides:
         for shape in slide.shapes:
             if not shape.has_text_frame:
@@ -156,6 +110,5 @@ def generate_certificate_png(donor_name, date=""):
         return png_resp.content
 
     finally:
-        for p in [tmp_path, work_path]:
-            if os.path.exists(p):
-                os.remove(p)
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
