@@ -6,6 +6,7 @@ ENV AzureWebJobsScriptRoot=/home/site/wwwroot \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libreoffice-writer \
+    libreoffice-impress \
     libreoffice-java-common \
     default-jre \
     fonts-dejavu \
@@ -21,6 +22,6 @@ COPY . /home/site/wwwroot
 # Convert legacy .ppt/.doc format (OLE2) to real .pptx (OOXML)
 RUN cd /home/site/wwwroot && \
     mv cert_template.pptx cert_template.ppt && \
-    libreoffice --headless --convert-to pptx cert_template.ppt --outdir /home/site/wwwroot && \
-    rm -f cert_template.ppt && \
-    python -c "import zipfile; assert zipfile.is_zipfile('cert_template.pptx'), 'Conversion failed: still not a valid PPTX'"
+    HOME=/tmp libreoffice --headless --norestore --convert-to pptx cert_template.ppt --outdir /home/site/wwwroot && \
+    python -c "import zipfile; assert zipfile.is_zipfile('cert_template.pptx'), 'Conversion failed: still not a valid PPTX'" && \
+    rm -f cert_template.ppt
