@@ -20,7 +20,7 @@ from pptx import Presentation
 
 TEMPLATE_DIR = os.path.dirname(os.path.abspath(__file__))
 CERTIFICATE_TEMPLATE = os.path.join(
-    TEMPLATE_DIR, "CERTIFICATE OF RECOGNITION-3.pptx"
+    TEMPLATE_DIR, "cert_template.pptx"
 )
 
 
@@ -63,8 +63,32 @@ def generate_certificate_png(donor_name, date=""):
         except ValueError:
             formatted_date = date
 
-    # Step 1: Replace text in PPTX
-    prs = Presentation(CERTIFICATE_TEMPLATE)
+    # Step 1: Verify template exists and is readable
+    if not os.path.exists(CERTIFICATE_TEMPLATE):
+        raise FileNotFoundError(f"Certificate template not found: {CERTIFICATE_TEMPLATE}")
+
+    file_size = os.path.getsize(CERTIFICATE_TEMPLATE)
+    logging.info(f"Template file: {CERTIFICATE_TEMPLATE} ({file_size} bytes)")
+
+    # Step 2: Read template into memory and validate
+    import zipfile
+    import io
+
+    with open(CERTIFICATE_TEMPLATE, "rb") as f:
+        template_bytes = f.read()
+
+    logging.info(f"Template read into memory: {len(template_bytes)} bytes, "
+                 f"first 4 bytes: {template_bytes[:4].hex()}")
+
+    # Valid ZIP/PPTX must start with PK signature (50 4B)
+    if not template_bytes[:2] == b'PK':
+        raise ValueError(
+            f"Template is not a valid ZIP/PPTX (bad magic bytes: "
+            f"{template_bytes[:4].hex()}). File may be corrupted, "
+            f"a Git LFS pointer, or incorrectly copied during Docker build."
+        )
+
+    prs = Presentation(io.BytesIO(template_bytes))
     for slide in prs.slides:
         for shape in slide.shapes:
             if not shape.has_text_frame:
@@ -72,13 +96,12 @@ def generate_certificate_png(donor_name, date=""):
             _replace_text_preserving_format(shape, "Full Name", donor_name)
             _replace_text_preserving_format(shape, "Date :  04-03-26", f"Date :  {formatted_date}")
 
-    with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
-        tmp_path = tmp.name
+    tmp_path = os.path.join(tempfile.gettempdir(), "cert_output.pptx")
     prs.save(tmp_path)
     logging.info(f"Certificate PPTX created for: {donor_name}")
 
     try:
-        # Step 2: Upload to ConvertAPI and convert PPTX → PNG
+        # Step 3: Upload to ConvertAPI and convert PPTX → PNG
         with open(tmp_path, "rb") as f:
             resp = requests.post(
                 f"https://v2.convertapi.com/convert/pptx/to/png?Secret={api_secret}",
