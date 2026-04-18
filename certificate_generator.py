@@ -70,25 +70,20 @@ def generate_certificate_png(donor_name, date=""):
     file_size = os.path.getsize(CERTIFICATE_TEMPLATE)
     logging.info(f"Template file: {CERTIFICATE_TEMPLATE} ({file_size} bytes)")
 
-    # Step 2: Read template into memory and validate
+    # Step 2: Copy template using raw file I/O to a simple temp path
+    tpl_path = os.path.join(tempfile.gettempdir(), "cert_input.pptx")
+    with open(CERTIFICATE_TEMPLATE, "rb") as src, open(tpl_path, "wb") as dst:
+        dst.write(src.read())
+
+    copied_size = os.path.getsize(tpl_path)
+    logging.info(f"Template copied to: {tpl_path} ({copied_size} bytes)")
+
+    # Verify the copy is a valid ZIP
     import zipfile
-    import io
+    if not zipfile.is_zipfile(tpl_path):
+        raise ValueError(f"Copied file is not a valid ZIP/PPTX: {tpl_path}")
 
-    with open(CERTIFICATE_TEMPLATE, "rb") as f:
-        template_bytes = f.read()
-
-    logging.info(f"Template read into memory: {len(template_bytes)} bytes, "
-                 f"first 4 bytes: {template_bytes[:4].hex()}")
-
-    # Valid ZIP/PPTX must start with PK signature (50 4B)
-    if not template_bytes[:2] == b'PK':
-        raise ValueError(
-            f"Template is not a valid ZIP/PPTX (bad magic bytes: "
-            f"{template_bytes[:4].hex()}). File may be corrupted, "
-            f"a Git LFS pointer, or incorrectly copied during Docker build."
-        )
-
-    prs = Presentation(io.BytesIO(template_bytes))
+    prs = Presentation(tpl_path)
     for slide in prs.slides:
         for shape in slide.shapes:
             if not shape.has_text_frame:
@@ -127,5 +122,6 @@ def generate_certificate_png(donor_name, date=""):
         return png_resp.content
 
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        for p in [tmp_path, tpl_path]:
+            if os.path.exists(p):
+                os.remove(p)

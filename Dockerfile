@@ -17,3 +17,10 @@ COPY requirements.txt /home/site/wwwroot/
 RUN pip install --no-cache-dir -r /home/site/wwwroot/requirements.txt
 
 COPY . /home/site/wwwroot
+
+# Convert legacy .ppt template to real .pptx if needed
+RUN if file /home/site/wwwroot/cert_template.pptx | grep -q "Composite Document"; then \
+      cd /home/site/wwwroot && \
+      libreoffice --headless --convert-to pptx cert_template.pptx --outdir /tmp && \
+      mv /tmp/cert_template.pptx cert_template.pptx; \
+    fi
