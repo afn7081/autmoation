@@ -5,7 +5,10 @@ Sends personalized donation emails via SendGrid with PDF receipt attached.
 import os
 import base64
 import logging
+import zipfile
+import mimetypes
 
+import requests
 from docx import Document
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import (
@@ -15,7 +18,120 @@ from sendgrid.helpers.mail import (
     FileName,
     FileType,
     Disposition,
+    ContentId,
 )
+
+
+def _convert_svg_to_png_convertapi(svg_path: str) -> bytes:
+    """Convert an SVG file to PNG bytes via ConvertAPI."""
+    api_secret = os.getenv("CONVERTAPI_SECRET")
+    if not api_secret:
+        raise ValueError("CONVERTAPI_SECRET is required for SVG->PNG conversion")
+
+    with open(svg_path, "rb") as f:
+        resp = requests.post(
+            f"https://v2.convertapi.com/convert/svg/to/png?Secret={api_secret}&StoreFile=true",
+            files={"File": ("header.svg", f, "image/svg+xml")},
+            timeout=120,
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"ConvertAPI svg->png failed ({resp.status_code}): {resp.text}")
+
+    files = (resp.json().get("Files") or [])
+    if not files:
+        raise RuntimeError(f"ConvertAPI returned no files: {resp.text}")
+    first = files[0]
+    url = first.get("Url") or first.get("FileUrl")
+    if url:
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        return r.content
+    data = first.get("FileData")
+    if not data:
+        raise RuntimeError(f"ConvertAPI response missing Url/FileData: {list(first.keys())}")
+    return base64.b64decode(data)
+
+
+def _shrink_png_for_email(png_bytes: bytes, max_width: int = 1200) -> bytes:
+    """Resize a PNG so its width <= max_width and re-encode for small file size.
+    Returns original bytes if Pillow isn't available or anything fails."""
+    try:
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(png_bytes))
+        if img.width > max_width:
+            ratio = max_width / img.width
+            new_size = (max_width, int(img.height * ratio))
+            img = img.resize(new_size, Image.LANCZOS)
+        out = io.BytesIO()
+        # Convert to RGB so we can save as JPEG (much smaller for photos/banners)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.save(out, format="JPEG", quality=85, optimize=True)
+        return out.getvalue()
+    except Exception as e:
+        logging.warning(f"Could not shrink header image: {e}")
+        return png_bytes
+
+
+def get_header_image():
+    """Return (image_bytes, mime, filename) for the email header.
+
+    Prefers an SVG in the working directory (converted to PNG via ConvertAPI
+    once, then resized + JPEG-compressed for email-friendly size, cached to
+    disk). Falls back to None if no SVG is present.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    svg_candidates = [
+        f for f in os.listdir(here)
+        if f.lower().endswith(".svg") and "header" in f.lower()
+    ]
+    if not svg_candidates:
+        svg_candidates = [f for f in os.listdir(here) if f.lower().endswith(".svg")]
+    if not svg_candidates:
+        return None
+
+    svg_path = os.path.join(here, svg_candidates[0])
+    cache_path = os.path.join(here, ".header_cache.jpg")
+
+    # Re-build cache if missing or older than the SVG
+    if (not os.path.exists(cache_path)
+            or os.path.getmtime(cache_path) < os.path.getmtime(svg_path)):
+        try:
+            logging.info(f"Converting header SVG -> PNG via ConvertAPI: {svg_candidates[0]}")
+            png = _convert_svg_to_png_convertapi(svg_path)
+            jpg = _shrink_png_for_email(png, max_width=1200)
+            with open(cache_path, "wb") as f:
+                f.write(jpg)
+            logging.info(f"Header cached: {len(jpg)} bytes (from {len(png)} bytes PNG)")
+        except Exception as e:
+            logging.warning(f"Header SVG->PNG conversion failed: {e}")
+            if not os.path.exists(cache_path):
+                return None
+
+    with open(cache_path, "rb") as f:
+        return f.read(), "image/jpeg", "header.jpg"
+
+
+def extract_first_image_from_docx(template_path):
+    """Return (image_bytes, mime_type, filename) for the first image embedded
+    in the given .docx, or None if there is no image."""
+    try:
+        with zipfile.ZipFile(template_path) as z:
+            media = sorted(
+                n for n in z.namelist()
+                if n.startswith("word/media/")
+                and n.lower().rsplit(".", 1)[-1] in ("png", "jpg", "jpeg", "gif")
+            )
+            if not media:
+                return None
+            name = media[0]
+            data = z.read(name)
+            mime, _ = mimetypes.guess_type(name)
+            return data, mime or "image/jpeg", os.path.basename(name)
+    except Exception as e:
+        logging.warning(f"Could not extract header image from {template_path}: {e}")
+        return None
 
 
 def read_email_template(template_path, donor_name):
@@ -94,25 +210,29 @@ def read_email_template(template_path, donor_name):
     plain_text = "\n".join(plain_lines)
 
     html_content = f'''
-    <div style="max-width:600px; margin:0 auto; font-family:Arial, Helvetica, sans-serif; color:#1a1a1a;">
+    <!DOCTYPE html>
+    <html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+      @media only screen and (max-width:600px) {{
+        .email-container {{ width:100% !important; max-width:100% !important; }}
+        .email-body, .email-footer {{ padding-left:18px !important; padding-right:18px !important; }}
+        .header-img {{ width:100% !important; height:auto !important; }}
+      }}
+    </style></head>
+    <body style="margin:0; padding:0; background-color:#f5f7fa;">
+    <div class="email-container" style="max-width:600px; width:100%; margin:0 auto; font-family:Arial, Helvetica, sans-serif; color:#1a1a1a;">
 
-        <!-- Header Banner -->
-        <div style="background-color:#1a3a5c; padding:24px 30px; text-align:center; border-radius:8px 8px 0 0;">
-            <h1 style="color:#ffffff; font-size:20px; margin:0; letter-spacing:0.5px;">
-                Global Women Foundation &amp; Band of Brothers
-            </h1>
-            <p style="color:#a8c4dc; font-size:12px; margin:6px 0 0 0;">
-                Ending Veteran Homelessness | Building Community
-            </p>
-        </div>
+        <!-- Header Banner (image extracted from .docx, or text fallback) -->
+        <!-- HEADER_IMAGE_PLACEHOLDER -->
 
         <!-- Body -->
-        <div style="background-color:#ffffff; padding:30px 30px 20px 30px; border-left:1px solid #e8e8e8; border-right:1px solid #e8e8e8;">
+        <div class="email-body" style="background-color:#ffffff; padding:30px 30px 20px 30px; border-left:1px solid #e8e8e8; border-right:1px solid #e8e8e8;">
             {"".join(body_parts)}
         </div>
 
         <!-- Footer -->
-        <div style="background-color:#f5f7fa; padding:20px 30px; text-align:center; border-radius:0 0 8px 8px; border:1px solid #e8e8e8; border-top:none;">
+        <div class="email-footer" style="background-color:#f5f7fa; padding:20px 30px; text-align:center; border-radius:0 0 8px 8px; border:1px solid #e8e8e8; border-top:none;">
             <p style="font-size:12px; color:#888; margin:4px 0;">
                 Global Women Foundation &amp; Band of Brothers | 501(c)(3) Nonprofit
             </p>
@@ -122,10 +242,10 @@ def read_email_template(template_path, donor_name):
             </p>
         </div>
 
-    </div>'''
+    </div>
+    </body></html>'''
 
     return plain_text, html_content
-
 
 
 def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, amount_dollars=0, date=""):
@@ -141,6 +261,27 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
         raise ValueError("SENDGRID_API_KEY environment variable is not set")
 
     plain_text, html_content = read_email_template(template_path, donor_name)
+
+    # Use a publicly hosted header image rather than a cid inline attachment.
+    # Gmail (especially the mobile app) blocks inline cid images on messages
+    # that fail DMARC alignment (sending a gmail.com From: via sendgrid.net),
+    # so we serve the banner from a public URL that Gmail's image proxy can
+    # fetch. This was the approach confirmed working previously.
+    header_url = os.getenv(
+        "HEADER_IMAGE_URL",
+        "https://raw.githubusercontent.com/afn7081/autmoation/mai/email-header.jpg",
+    )
+    header_html = f'''
+        <div style="width:100%; text-align:center; line-height:0; font-size:0;">
+            <a href="https://www.gwfbob.org" style="text-decoration:none;">
+              <img src="{header_url}"
+                   alt="Global Women Foundation & Band of Brothers"
+                   width="600"
+                   class="header-img"
+                   style="width:100%; max-width:600px; height:auto; display:block; margin:0 auto; border:0; outline:none; text-decoration:none;" />
+            </a>
+        </div>'''
+    html_content = html_content.replace('<!-- HEADER_IMAGE_PLACEHOLDER -->', header_html)
 
     # Generate certificate for $1000+ donors and embed in email HTML
     cert_png = None
@@ -184,7 +325,10 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
             FileType("application/pdf"),
             Disposition("attachment"),
         )
-        message.attachment = attachment
+        message.add_attachment(attachment)
+
+    # Header image is served via public URL (see header_html above), so no
+    # cid attachment is needed.
 
     # Attach certificate inline + as download for $1000+ donors
     if cert_png:
@@ -196,9 +340,9 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
             FileName("certificate.png"),
             FileType("image/png"),
             Disposition("inline"),
+            ContentId("certificate_image"),
         )
-        inline_attachment.content_id = "certificate_image"
-        message.attachment = inline_attachment
+        message.add_attachment(inline_attachment)
 
         # Also attach as downloadable file
         dl_attachment = Attachment(
@@ -207,7 +351,7 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
             FileType("image/png"),
             Disposition("attachment"),
         )
-        message.attachment = dl_attachment
+        message.add_attachment(dl_attachment)
 
         logging.info("Certificate embedded and attached successfully")
 

@@ -6,6 +6,7 @@ import os
 import json
 import logging
 import tempfile
+import threading
 from datetime import datetime, timezone
 
 import azure.functions as func
@@ -13,13 +14,36 @@ import stripe
 
 from email_sender import send_donation_email
 from pdf_generator import generate_receipt_pdf
+from asset_store import get_asset
 
 app = func.FunctionApp()
 
-TEMPLATE_DIR = os.path.dirname(os.path.abspath(__file__))
-GENERAL_EMAIL_TEMPLATE = os.path.join(TEMPLATE_DIR, "General Email Template.docx")
-DONOR_ABOVE_1000_TEMPLATE = os.path.join(TEMPLATE_DIR, "Email Template for Donors above $1000.docx")
-FORMAT_TEMPLATE = os.path.join(TEMPLATE_DIR, "format.docx")
+# Blob names in the Azure Storage container.
+GENERAL_EMAIL_BLOB = "General Email Template.docx"
+DONOR_ABOVE_1000_BLOB = "Email Template for Donors above $1000.docx"
+FORMAT_BLOB = "format.docx"
+
+# ── Idempotency: dedupe by payment_intent_id across retries/restarts ─────────
+_PROCESSED_PI_FILE = os.path.join(tempfile.gettempdir(), "processed_payment_intents.txt")
+_PROCESSED_LOCK = threading.Lock()
+
+
+def _already_processed(pi_id: str) -> bool:
+    if not pi_id:
+        return False
+    with _PROCESSED_LOCK:
+        if not os.path.exists(_PROCESSED_PI_FILE):
+            return False
+        with open(_PROCESSED_PI_FILE, "r") as f:
+            return pi_id in {line.strip() for line in f}
+
+
+def _mark_processed(pi_id: str) -> None:
+    if not pi_id:
+        return
+    with _PROCESSED_LOCK:
+        with open(_PROCESSED_PI_FILE, "a") as f:
+            f.write(pi_id + "\n")
 
 
 def format_currency(amount_cents):
@@ -108,14 +132,14 @@ def handle_successful_payment(payment_intent, event_id="unknown"):
     )
 
     if amount_dollars >= 1000:
-        email_template_path = DONOR_ABOVE_1000_TEMPLATE
+        email_template_path = get_asset(DONOR_ABOVE_1000_BLOB)
         logging.info(f"{log_prefix} Using $1000+ template with certificate")
     else:
-        email_template_path = GENERAL_EMAIL_TEMPLATE
+        email_template_path = get_asset(GENERAL_EMAIL_BLOB)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         pdf_path = generate_receipt_pdf(
-            template_path=FORMAT_TEMPLATE,
+            template_path=get_asset(FORMAT_BLOB),
             output_dir=tmpdir,
             donor_name=donor["name"],
             amount=donor["amount_formatted"],
@@ -159,20 +183,23 @@ def stripe_webhook(req: func.HttpRequest) -> func.HttpResponse:
     logging.info(f"[evt={event_id}] Received {event_type}")
 
     if event_type == "payment_intent.succeeded":
-        payment_intent = event["data"]["object"]
-        handle_successful_payment(payment_intent, event_id)
-    elif event_type == "charge.succeeded":
-        charge = event["data"]["object"]
-        pi_id = charge.get("payment_intent")
-        if pi_id:
-            try:
-                payment_intent = stripe.PaymentIntent.retrieve(pi_id)
-                handle_successful_payment(payment_intent, event_id)
-            except Exception as e:
-                logging.error(f"[evt={event_id}] Failed to retrieve PaymentIntent {pi_id}: {e}")
-                return func.HttpResponse(
-                    json.dumps({"error": "Failed to process"}), status_code=500
-                )
+        pi = event["data"]["object"]
+        pi_id = pi.get("id", "")
+
+        if _already_processed(pi_id):
+            logging.info(f"[evt={event_id}][pi={pi_id}] Already processed, skipping (dedup)")
+            return func.HttpResponse(json.dumps({"status": "duplicate"}), status_code=200)
+
+        # Mark BEFORE processing so concurrent retries also see it
+        _mark_processed(pi_id)
+
+        try:
+            handle_successful_payment(pi, event_id)
+        except Exception as e:
+            logging.exception(f"[evt={event_id}] Processing failed: {e}")
+            return func.HttpResponse(
+                json.dumps({"error": "Failed to process"}), status_code=500
+            )
 
     return func.HttpResponse(json.dumps({"status": "ok"}), status_code=200)
 

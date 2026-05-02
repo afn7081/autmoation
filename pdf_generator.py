@@ -7,6 +7,7 @@ then converts the filled DOCX to PDF.
 
 import os
 import copy
+import uuid
 import subprocess
 import platform
 from docx import Document
@@ -135,9 +136,9 @@ def convert_docx_to_pdf(docx_path, output_dir):
     else:
         soffice = "libreoffice"
 
-    # Create an isolated user profile so LibreOffice doesn't conflict
-    user_profile = os.path.join(output_dir, "libreoffice_profile")
-    os.makedirs(user_profile, exist_ok=True)
+    # LibreOffice wants to *create* the UserInstallation dir itself; pre-existing dirs
+    # trigger "folder exists and overwrite forbidden". Use a unique non-existent path.
+    user_profile = os.path.join(output_dir, f"libreoffice_profile_{uuid.uuid4().hex}")
 
     env = os.environ.copy()
     env["HOME"] = "/tmp"

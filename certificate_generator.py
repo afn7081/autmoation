@@ -3,29 +3,53 @@ Generates personalized certificate PNGs from a PPTX template.
 
 Flow:
   1. Open the PPTX template
-  2. Replace "Name" placeholder with the donor's actual name
-  3. Upload to ConvertAPI to convert PPTX → PNG
-  4. Download and return the PNG bytes
+  2. Replace "Full Name" and date placeholder with donor-specific values
+  3. Convert PPTX -> PNG. By default uses LibreOffice locally (no API limits).
+     Set USE_LOCAL_PPTX_CONVERSION=false to fall back to ConvertAPI.
+  4. Return the PNG bytes
 
-Required environment variables:
-  - CONVERTAPI_SECRET
+Env vars:
+  - USE_LOCAL_PPTX_CONVERSION: "true" (default) or "false"
+  - CONVERTAPI_SECRET: required only when USE_LOCAL_PPTX_CONVERSION=false
 """
 
 import os
+import uuid
+import base64
+import shutil
 import logging
+import platform
 import tempfile
-import requests
+import subprocess
+from datetime import datetime, timezone
 
+import requests
 from pptx import Presentation
 
-TEMPLATE_DIR = os.path.dirname(os.path.abspath(__file__))
-CERTIFICATE_TEMPLATE = os.path.join(
-    TEMPLATE_DIR, "cert_template.pptx"
-)
+from asset_store import get_asset
+
+CERTIFICATE_TEMPLATE_BLOB = "cert_template_new.pptx"
+
+
+def _use_local() -> bool:
+    return os.getenv("USE_LOCAL_PPTX_CONVERSION", "true").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _soffice_cmd() -> str:
+    if platform.system() == "Windows":
+        for p in (
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ):
+            if os.path.exists(p):
+                return p
+        return "soffice"
+    return "libreoffice"
 
 
 def _replace_text_preserving_format(shape, old_text, new_text):
-    """Replace text in a shape while preserving font formatting."""
     for para in shape.text_frame.paragraphs:
         if old_text not in para.text:
             continue
@@ -33,82 +57,133 @@ def _replace_text_preserving_format(shape, old_text, new_text):
             if old_text in run.text:
                 run.text = run.text.replace(old_text, new_text)
                 return True
+        if para.runs:
+            combined = "".join(r.text for r in para.runs)
+            if old_text in combined:
+                para.runs[0].text = combined.replace(old_text, new_text)
+                for r in para.runs[1:]:
+                    r.text = ""
+                return True
     return False
 
 
-def generate_certificate_png(donor_name, date=""):
-    """
-    Generate a personalized certificate PNG using ConvertAPI.
+def _format_date(date: str) -> str:
+    if not date:
+        return datetime.now(timezone.utc).strftime("%m-%d-%y")
+    try:
+        return datetime.strptime(date, "%B %d, %Y").strftime("%m-%d-%y")
+    except ValueError:
+        return date
 
-    Args:
-        donor_name: The donor's full name to place on the certificate.
-        date: The donation date string (e.g. "April 16, 2026").
 
-    Returns:
-        bytes: The PNG image data of the personalized certificate.
-    """
+def _convert_pptx_to_png_local(pptx_path: str, work_dir: str) -> bytes:
+    """Use LibreOffice headless to convert a PPTX to PNG (first slide)."""
+    soffice = _soffice_cmd()
+    user_profile = os.path.join(work_dir, f"libreoffice_profile_{uuid.uuid4().hex}")
+
+    env = os.environ.copy()
+    env["HOME"] = "/tmp"
+
+    cmd = [
+        soffice,
+        "--headless",
+        "--norestore",
+        "--nofirststartwizard",
+        f"-env:UserInstallation=file://{user_profile}",
+        "--convert-to", "png",
+        "--outdir", work_dir,
+        pptx_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180, env=env)
+
+    base = os.path.splitext(os.path.basename(pptx_path))[0]
+    png_path = os.path.join(work_dir, f"{base}.png")
+    if not os.path.exists(png_path):
+        raise RuntimeError(
+            f"LibreOffice PPTX->PNG failed (exit {result.returncode}):\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}\ncmd: {' '.join(cmd)}"
+        )
+    with open(png_path, "rb") as f:
+        return f.read()
+
+
+def _convert_pptx_to_png_convertapi(pptx_path: str) -> bytes:
     api_secret = os.getenv("CONVERTAPI_SECRET")
     if not api_secret:
-        raise ValueError("CONVERTAPI_SECRET environment variable is not set")
+        raise ValueError("CONVERTAPI_SECRET is required when USE_LOCAL_PPTX_CONVERSION=false")
 
-    # Format date to MM-DD-YY to match certificate style
-    if not date:
-        from datetime import datetime, timezone
-        formatted_date = datetime.now(timezone.utc).strftime("%m-%d-%y")
-    else:
-        try:
-            from datetime import datetime
-            parsed = datetime.strptime(date, "%B %d, %Y")
-            formatted_date = parsed.strftime("%m-%d-%y")
-        except ValueError:
-            formatted_date = date
+    with open(pptx_path, "rb") as f:
+        resp = requests.post(
+            f"https://v2.convertapi.com/convert/pptx/to/png?Secret={api_secret}&StoreFile=true",
+            files={"File": (
+                "certificate.pptx",
+                f,
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )},
+            timeout=120,
+        )
 
-    # Step 1: Verify template exists and is readable
-    if not os.path.exists(CERTIFICATE_TEMPLATE):
-        raise FileNotFoundError(f"Certificate template not found: {CERTIFICATE_TEMPLATE}")
+    if resp.status_code != 200:
+        raise RuntimeError(f"ConvertAPI failed ({resp.status_code}): {resp.text}")
 
-    file_size = os.path.getsize(CERTIFICATE_TEMPLATE)
-    logging.info(f"Template file: {CERTIFICATE_TEMPLATE} ({file_size} bytes)")
+    result = resp.json()
+    files = result.get("Files") or result.get("files") or []
+    if not files:
+        raise RuntimeError(f"ConvertAPI returned no files: {result}")
 
-    # Step 2: Open template and replace placeholders
-    prs = Presentation(CERTIFICATE_TEMPLATE)
+    first = files[0]
+    png_url = first.get("Url") or first.get("url") or first.get("FileUrl")
+    if png_url:
+        png_resp = requests.get(png_url, timeout=60)
+        png_resp.raise_for_status()
+        return png_resp.content
+
+    file_data = first.get("FileData") or first.get("fileData")
+    if not file_data:
+        raise RuntimeError(f"ConvertAPI response missing Url/FileData. Keys: {list(first.keys())}")
+    return base64.b64decode(file_data)
+
+
+def generate_certificate_png(donor_name: str, date: str = "") -> bytes:
+    template_path = get_asset(CERTIFICATE_TEMPLATE_BLOB)
+
+    file_size = os.path.getsize(template_path)
+    logging.info(f"Template file: {template_path} ({file_size} bytes)")
+
+    formatted_date = _format_date(date)
+
+    prs = Presentation(template_path)
+    name_replaced = date_replaced = False
     for slide in prs.slides:
         for shape in slide.shapes:
             if not shape.has_text_frame:
                 continue
-            _replace_text_preserving_format(shape, "Full Name", donor_name)
-            _replace_text_preserving_format(shape, "Date :  04-03-26", f"Date :  {formatted_date}")
+            if not name_replaced and _replace_text_preserving_format(shape, "Full Name", donor_name):
+                name_replaced = True
+            if not date_replaced and _replace_text_preserving_format(
+                shape, "Date :  04-03-26", f"Date :  {formatted_date}"
+            ):
+                date_replaced = True
 
-    tmp_path = os.path.join(tempfile.gettempdir(), "cert_output.pptx")
-    prs.save(tmp_path)
-    logging.info(f"Certificate PPTX created for: {donor_name}")
+    if not name_replaced:
+        logging.warning("PPTX: 'Full Name' placeholder not found")
+    if not date_replaced:
+        logging.warning("PPTX: date placeholder 'Date :  04-03-26' not found")
+
+    work_dir = tempfile.mkdtemp(prefix="cert_")
+    pptx_out = os.path.join(work_dir, "certificate.pptx")
+    prs.save(pptx_out)
+    logging.info(f"Certificate PPTX built for: {donor_name}")
 
     try:
-        # Step 3: Upload to ConvertAPI and convert PPTX → PNG
-        with open(tmp_path, "rb") as f:
-            resp = requests.post(
-                f"https://v2.convertapi.com/convert/pptx/to/png?Secret={api_secret}",
-                files={"File": ("certificate.pptx", f,
-                    "application/vnd.openxmlformats-officedocument.presentationml.presentation")},
-                timeout=60,
-            )
+        if _use_local():
+            logging.info("Converting PPTX->PNG locally via LibreOffice")
+            png_bytes = _convert_pptx_to_png_local(pptx_out, work_dir)
+        else:
+            logging.info("Converting PPTX->PNG via ConvertAPI")
+            png_bytes = _convert_pptx_to_png_convertapi(pptx_out)
 
-        if resp.status_code != 200:
-            raise RuntimeError(f"ConvertAPI failed ({resp.status_code}): {resp.text}")
-
-        result = resp.json()
-        files = result.get("Files", [])
-        if not files:
-            raise RuntimeError(f"ConvertAPI returned no files: {result}")
-
-        # Step 3: Download the first slide PNG
-        png_url = files[0]["Url"]
-        png_resp = requests.get(png_url, timeout=30)
-        png_resp.raise_for_status()
-
-        logging.info(f"Certificate PNG downloaded ({len(png_resp.content)} bytes)")
-        return png_resp.content
-
+        logging.info(f"Certificate PNG generated ({len(png_bytes)} bytes)")
+        return png_bytes
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        shutil.rmtree(work_dir, ignore_errors=True)

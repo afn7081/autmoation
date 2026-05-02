@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "appName":             { "value": "donations-app" },
+    "location":            { "value": "eastus" },
+    "acrSku":              { "value": "Basic" },
+    "containerImage":      { "value": "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest" },
+    "targetPort":          { "value": 80 },
+    "cpu":                 { "value": "1.0" },
+    "memory":              { "value": "2Gi" },
+    "minReplicas":         { "value": 0 },
+    "maxReplicas":         { "value": 1 },
+    "fromEmail":           { "value": "donations@example.org" },
+    "fromName":            { "value": "Donations" },
+    "stripeSecretKey":     { "value": "" },
+    "stripeWebhookSecret": { "value": "" },
+    "sendgridApiKey":      { "value": "" },
+    "cloudconvertApiKey":  { "value": "" },
+    "convertapiSecret":    { "value": "" }
+  }
+}

@@ -8,7 +8,6 @@ test_*
 canva_oauth_setup.py
 
 # Large design files not needed at runtime
-*.svg
 CERTIFICATE OF RECOGNITION.html
 CERTIFICATE OF RECOGNITION_files/
 certificate_template.html

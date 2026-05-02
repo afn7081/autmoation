@@ -1,0 +1,281 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Generic deployment template for the Donation Automation app. Provisions Log Analytics, Azure Container Registry, Storage Account (with a 'templates' blob container), a Container Apps managed environment, and the Container App itself with all required environment variables/secrets."
+  },
+  "parameters": {
+    "appName": {
+      "type": "string",
+      "defaultValue": "donations-app",
+      "metadata": { "description": "Base name used for resources. Lowercase letters and hyphens." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": { "description": "Azure region for all resources." }
+    },
+    "containerAppName": {
+      "type": "string",
+      "defaultValue": "[parameters('appName')]"
+    },
+    "managedEnvironmentName": {
+      "type": "string",
+      "defaultValue": "[concat(parameters('appName'), '-env')]"
+    },
+    "logAnalyticsWorkspaceName": {
+      "type": "string",
+      "defaultValue": "[concat(parameters('appName'), '-logs')]"
+    },
+    "acrName": {
+      "type": "string",
+      "defaultValue": "[concat(replace(parameters('appName'), '-', ''), 'acr', uniqueString(resourceGroup().id))]",
+      "metadata": { "description": "ACR name. Must be globally unique, 5-50 alphanumeric chars." }
+    },
+    "acrSku": {
+      "type": "string",
+      "defaultValue": "Basic",
+      "allowedValues": [ "Basic", "Standard", "Premium" ]
+    },
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "[concat('st', uniqueString(resourceGroup().id, parameters('appName')))]",
+      "metadata": { "description": "Storage account name. 3-24 lowercase alphanumeric, globally unique." }
+    },
+    "templatesContainerName": {
+      "type": "string",
+      "defaultValue": "templates",
+      "metadata": { "description": "Blob container that stores certificate / email templates and assets." }
+    },
+    "containerImage": {
+      "type": "string",
+      "defaultValue": "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest",
+      "metadata": { "description": "Full container image reference. Replace with <yourAcr>.azurecr.io/<repo>:<tag> after pushing your image." }
+    },
+    "targetPort": {
+      "type": "int",
+      "defaultValue": 80
+    },
+    "cpu": {
+      "type": "string",
+      "defaultValue": "1.0"
+    },
+    "memory": {
+      "type": "string",
+      "defaultValue": "2Gi"
+    },
+    "minReplicas": {
+      "type": "int",
+      "defaultValue": 0
+    },
+    "maxReplicas": {
+      "type": "int",
+      "defaultValue": 1
+    },
+    "stripeSecretKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": { "description": "Stripe secret key (sk_live_... or sk_test_...)" }
+    },
+    "stripeWebhookSecret": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": { "description": "Stripe webhook signing secret (whsec_...)" }
+    },
+    "sendgridApiKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": { "description": "SendGrid API key (SG.xxxx)" }
+    },
+    "fromEmail": {
+      "type": "string",
+      "defaultValue": "donations@example.org"
+    },
+    "fromName": {
+      "type": "string",
+      "defaultValue": "Donations"
+    },
+    "cloudconvertApiKey": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": { "description": "CloudConvert API key (JWT). Optional." }
+    },
+    "convertapiSecret": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": { "description": "ConvertAPI secret. Optional." }
+    }
+  },
+  "variables": {
+    "acrLoginServer": "[concat(parameters('acrName'), '.azurecr.io')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[parameters('logAnalyticsWorkspaceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": { "name": "PerGB2018" },
+        "retentionInDays": 30,
+        "features": { "enableLogAccessUsingOnlyResourcePermissions": true },
+        "publicNetworkAccessForIngestion": "Enabled",
+        "publicNetworkAccessForQuery": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.ContainerRegistry/registries",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('acrName')]",
+      "location": "[parameters('location')]",
+      "sku": { "name": "[parameters('acrSku')]" },
+      "properties": {
+        "adminUserEnabled": true,
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "sku": { "name": "Standard_LRS" },
+      "kind": "StorageV2",
+      "properties": {
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "supportsHttpsTrafficOnly": true,
+        "accessTier": "Hot",
+        "publicNetworkAccess": "Enabled",
+        "networkAcls": { "bypass": "AzureServices", "defaultAction": "Allow" }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(parameters('storageAccountName'), '/default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+      ],
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(parameters('storageAccountName'), '/default/', parameters('templatesContainerName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]"
+      ],
+      "properties": { "publicAccess": "None" }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('managedEnvironmentName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]"
+      ],
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName')), '2022-10-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName')), '2022-10-01').primarySharedKey]"
+          }
+        },
+        "workloadProfiles": [
+          { "workloadProfileType": "Consumption", "name": "Consumption" }
+        ],
+        "zoneRedundant": false
+      }
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('containerAppName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('managedEnvironmentName'))]",
+        "[resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('templatesContainerName'))]"
+      ],
+      "kind": "functionapp",
+      "properties": {
+        "managedEnvironmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('managedEnvironmentName'))]",
+        "workloadProfileName": "Consumption",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "ingress": {
+            "external": true,
+            "targetPort": "[parameters('targetPort')]",
+            "transport": "Auto",
+            "allowInsecure": false,
+            "traffic": [ { "weight": 100, "latestRevision": true } ]
+          },
+          "secrets": [
+            { "name": "acr-password", "value": "[listCredentials(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-07-01').passwords[0].value]" },
+            { "name": "stripe-secret-key", "value": "[parameters('stripeSecretKey')]" },
+            { "name": "stripe-webhook-secret", "value": "[parameters('stripeWebhookSecret')]" },
+            { "name": "sendgrid-api-key", "value": "[parameters('sendgridApiKey')]" },
+            { "name": "cloudconvert-api-key", "value": "[parameters('cloudconvertApiKey')]" },
+            { "name": "convertapi-secret", "value": "[parameters('convertapiSecret')]" },
+            { "name": "storage-connection-string", "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', parameters('storageAccountName'), ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01').keys[0].value, ';EndpointSuffix=core.windows.net')]" }
+          ],
+          "registries": [
+            {
+              "server": "[variables('acrLoginServer')]",
+              "username": "[parameters('acrName')]",
+              "passwordSecretRef": "acr-password"
+            }
+          ]
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "[parameters('containerAppName')]",
+              "image": "[parameters('containerImage')]",
+              "resources": {
+                "cpu": "[json(parameters('cpu'))]",
+                "memory": "[parameters('memory')]"
+              },
+              "env": [
+                { "name": "STRIPE_SECRET_KEY", "secretRef": "stripe-secret-key" },
+                { "name": "STRIPE_WEBHOOK_SECRET", "secretRef": "stripe-webhook-secret" },
+                { "name": "SENDGRID_API_KEY", "secretRef": "sendgrid-api-key" },
+                { "name": "FROM_EMAIL", "value": "[parameters('fromEmail')]" },
+                { "name": "FROM_NAME", "value": "[parameters('fromName')]" },
+                { "name": "CLOUDCONVERT_API_KEY", "secretRef": "cloudconvert-api-key" },
+                { "name": "CONVERTAPI_SECRET", "secretRef": "convertapi-secret" },
+                { "name": "AZURE_STORAGE_CONNECTION_STRING", "secretRef": "storage-connection-string" },
+                { "name": "AZURE_STORAGE_CONTAINER", "value": "[parameters('templatesContainerName')]" }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": "[parameters('minReplicas')]",
+            "maxReplicas": "[parameters('maxReplicas')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "containerAppFqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('containerAppName')), '2024-03-01').configuration.ingress.fqdn]"
+    },
+    "acrLoginServer": {
+      "type": "string",
+      "value": "[variables('acrLoginServer')]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[parameters('storageAccountName')]"
+    },
+    "templatesContainer": {
+      "type": "string",
+      "value": "[parameters('templatesContainerName')]"
+    }
+  }
+}
