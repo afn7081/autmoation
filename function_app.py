@@ -193,13 +193,20 @@ def stripe_webhook(req: func.HttpRequest) -> func.HttpResponse:
         # Mark BEFORE processing so concurrent retries also see it
         _mark_processed(pi_id)
 
-        try:
-            handle_successful_payment(pi, event_id)
-        except Exception as e:
-            logging.exception(f"[evt={event_id}] Processing failed: {e}")
-            return func.HttpResponse(
-                json.dumps({"error": "Failed to process"}), status_code=500
-            )
+        # Process asynchronously so we can ACK Stripe within its ~30s timeout.
+        # The heavy work (PDF + certificate generation + SVG->PNG conversion +
+        # SendGrid send) can take longer than Stripe is willing to wait, which
+        # caused "context deadline exceeded" timeouts and unnecessary retries.
+        def _process_async(pi=pi, event_id=event_id):
+            try:
+                handle_successful_payment(pi, event_id)
+            except Exception as e:
+                logging.exception(f"[evt={event_id}] Async processing failed: {e}")
+
+        threading.Thread(
+            target=_process_async, name=f"webhook-{pi_id}", daemon=True
+        ).start()
+        logging.info(f"[evt={event_id}][pi={pi_id}] Dispatched to background worker")
 
     return func.HttpResponse(json.dumps({"status": "ok"}), status_code=200)
 

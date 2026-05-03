@@ -3,6 +3,7 @@ Sends personalized donation emails via SendGrid with PDF receipt attached.
 """
 
 import os
+import time
 import base64
 import logging
 import zipfile
@@ -22,34 +23,70 @@ from sendgrid.helpers.mail import (
 )
 
 
-def _convert_svg_to_png_convertapi(svg_path: str) -> bytes:
-    """Convert an SVG file to PNG bytes via ConvertAPI."""
-    api_secret = os.getenv("CONVERTAPI_SECRET")
-    if not api_secret:
-        raise ValueError("CONVERTAPI_SECRET is required for SVG->PNG conversion")
+def _convert_svg_to_png_cloudconvert(svg_path: str) -> bytes:
+    """Convert an SVG file to PNG bytes via CloudConvert (https://cloudconvert.com).
 
+    Requires CLOUDCONVERT_API_KEY (a Bearer token) in the environment.
+    Creates a job with import-upload -> convert -> export-url tasks, uploads the
+    SVG, polls until the job finishes, and downloads the resulting PNG.
+    """
+    api_key = os.getenv("CLOUDCONVERT_API_KEY")
+    if not api_key:
+        raise ValueError("CLOUDCONVERT_API_KEY is required for SVG->PNG conversion")
+
+    base = "https://api.cloudconvert.com/v2"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    job_payload = {
+        "tasks": {
+            "import-svg": {"operation": "import/upload"},
+            "convert-svg": {
+                "operation": "convert",
+                "input": "import-svg",
+                "input_format": "svg",
+                "output_format": "png",
+            },
+            "export-png": {"operation": "export/url", "input": "convert-svg"},
+        }
+    }
+
+    resp = requests.post(f"{base}/jobs", json=job_payload, headers=headers, timeout=60)
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"CloudConvert job create failed ({resp.status_code}): {resp.text}")
+    job = resp.json()["data"]
+    job_id = job["id"]
+
+    upload_task = next(t for t in job["tasks"] if t["name"] == "import-svg")
+    form = upload_task["result"]["form"]
     with open(svg_path, "rb") as f:
-        resp = requests.post(
-            f"https://v2.convertapi.com/convert/svg/to/png?Secret={api_secret}&StoreFile=true",
-            files={"File": ("header.svg", f, "image/svg+xml")},
+        up = requests.post(
+            form["url"],
+            data=form["parameters"],
+            files={"file": ("header.svg", f, "image/svg+xml")},
             timeout=120,
         )
-    if resp.status_code != 200:
-        raise RuntimeError(f"ConvertAPI svg->png failed ({resp.status_code}): {resp.text}")
+    if up.status_code not in (200, 201, 204):
+        raise RuntimeError(f"CloudConvert upload failed ({up.status_code}): {up.text}")
 
-    files = (resp.json().get("Files") or [])
-    if not files:
-        raise RuntimeError(f"ConvertAPI returned no files: {resp.text}")
-    first = files[0]
-    url = first.get("Url") or first.get("FileUrl")
-    if url:
-        r = requests.get(url, timeout=60)
-        r.raise_for_status()
-        return r.content
-    data = first.get("FileData")
-    if not data:
-        raise RuntimeError(f"ConvertAPI response missing Url/FileData: {list(first.keys())}")
-    return base64.b64decode(data)
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        s = requests.get(f"{base}/jobs/{job_id}", headers=headers, timeout=30)
+        s.raise_for_status()
+        data = s.json()["data"]
+        status = data["status"]
+        if status == "finished":
+            export_task = next(t for t in data["tasks"] if t["name"] == "export-png")
+            files = (export_task.get("result") or {}).get("files") or []
+            if not files:
+                raise RuntimeError(f"CloudConvert export returned no files: {export_task}")
+            r = requests.get(files[0]["url"], timeout=120)
+            r.raise_for_status()
+            return r.content
+        if status == "error":
+            raise RuntimeError(f"CloudConvert job error: {data}")
+        time.sleep(2)
+
+    raise RuntimeError("CloudConvert job timed out after 180s")
 
 
 def _shrink_png_for_email(png_bytes: bytes, max_width: int = 1200) -> bytes:
@@ -98,8 +135,8 @@ def get_header_image():
     if (not os.path.exists(cache_path)
             or os.path.getmtime(cache_path) < os.path.getmtime(svg_path)):
         try:
-            logging.info(f"Converting header SVG -> PNG via ConvertAPI: {svg_candidates[0]}")
-            png = _convert_svg_to_png_convertapi(svg_path)
+            logging.info(f"Converting header SVG -> PNG via CloudConvert: {svg_candidates[0]}")
+            png = _convert_svg_to_png_cloudconvert(svg_path)
             jpg = _shrink_png_for_email(png, max_width=1200)
             with open(cache_path, "wb") as f:
                 f.write(jpg)
@@ -262,25 +299,33 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
 
     plain_text, html_content = read_email_template(template_path, donor_name)
 
-    # Use a publicly hosted header image rather than a cid inline attachment.
-    # Gmail (especially the mobile app) blocks inline cid images on messages
-    # that fail DMARC alignment (sending a gmail.com From: via sendgrid.net),
-    # so we serve the banner from a public URL that Gmail's image proxy can
-    # fetch. This was the approach confirmed working previously.
-    header_url = os.getenv(
-        "HEADER_IMAGE_URL",
-        "https://raw.githubusercontent.com/afn7081/autmoation/mai/email-header.jpg",
-    )
-    header_html = f'''
+    # Embed the header as an inline cid: attachment (same approach as the
+    # certificate image below). Gmail's image proxy was failing to fetch the
+    # public URL reliably, while inline cid images render correctly.
+    header_bytes = None
+    header_mime = "image/jpeg"
+    header = get_header_image()
+    if header:
+        header_bytes, header_mime, _ = header
+    else:
+        local_header = os.path.join(os.path.dirname(os.path.abspath(__file__)), "email-header.jpg")
+        if os.path.exists(local_header):
+            with open(local_header, "rb") as f:
+                header_bytes = f.read()
+
+    if header_bytes:
+        header_html = '''
         <div style="width:100%; text-align:center; line-height:0; font-size:0;">
             <a href="https://www.gwfbob.org" style="text-decoration:none;">
-              <img src="{header_url}"
+              <img src="cid:header_image"
                    alt="Global Women Foundation & Band of Brothers"
                    width="600"
                    class="header-img"
                    style="width:100%; max-width:600px; height:auto; display:block; margin:0 auto; border:0; outline:none; text-decoration:none;" />
             </a>
         </div>'''
+    else:
+        header_html = ''
     html_content = html_content.replace('<!-- HEADER_IMAGE_PLACEHOLDER -->', header_html)
 
     # Generate certificate for $1000+ donors and embed in email HTML
@@ -327,8 +372,18 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
         )
         message.add_attachment(attachment)
 
-    # Header image is served via public URL (see header_html above), so no
-    # cid attachment is needed.
+    # Attach header image inline (referenced by cid:header_image above)
+    if header_bytes:
+        encoded_header = base64.b64encode(header_bytes).decode()
+        header_ext = "jpg" if header_mime == "image/jpeg" else "png"
+        header_attachment = Attachment(
+            FileContent(encoded_header),
+            FileName(f"header.{header_ext}"),
+            FileType(header_mime),
+            Disposition("inline"),
+            ContentId("header_image"),
+        )
+        message.add_attachment(header_attachment)
 
     # Attach certificate inline + as download for $1000+ donors
     if cert_png:
