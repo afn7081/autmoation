@@ -3,7 +3,7 @@
 ## Prerequisites
 - Azure account at [portal.azure.com](https://portal.azure.com)
 - Docker Desktop installed locally
-- Your Stripe & SendGrid API keys ready
+- Your Stripe keys and Azure Communication Services Email connection string ready
 
 ---
 
@@ -87,9 +87,8 @@ docker push gwfbobacr.azurecr.io/donation-func:latest
    |--------------------------|---------------------------------------------|
    | `STRIPE_SECRET_KEY`      | `sk_live_...` (from Stripe Dashboard)       |
    | `STRIPE_WEBHOOK_SECRET`  | `whsec_...` (you'll get this in Step 6)     |
-   | `SENDGRID_API_KEY`       | `SG...` (from SendGrid Dashboard)           |
-   | `FROM_EMAIL`             | `info@gwfbob.org`                           |
-   | `FROM_NAME`              | `Global Women Foundation & Band of Brothers`|
+   | `AZURE_COMMUNICATION_CONNECTION_STRING` | Communication Services resource → Keys |
+   | `AZURE_EMAIL_SENDER_ADDRESS` | MailFrom address from the linked email domain |
 
 3. Click **Apply** → **Confirm**
 

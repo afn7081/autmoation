@@ -3,10 +3,12 @@
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "STRIPE_SECRET_KEY": "sk_test_...",
-    "STRIPE_WEBHOOK_SECRET": "whsec_...",
-    "SENDGRID_API_KEY": "SG...",
-    "FROM_EMAIL": "info@gwfbob.org",
-    "FROM_NAME": "Global Women Foundation & Band of Brothers"
+    "STRIPE_SECRET_KEY": "sk_test_51TLHhdBmduIuVQwjNfAuDCPshnqkIXBzNz6V67Ucqkw4EYdEtyuEeI4qQQFTMvPlZAaGASHKcr5lFXDMA4pF1CVw0062J6OICC",
+    "STRIPE_WEBHOOK_SECRET": "whsec_0ae9d949dad5891257b114e60f0c2903e986342a633d3e7220fe00bd530a50b1",
+    "SENDGRID_API_KEY": "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",
+    "FROM_EMAIL": "khan.afnan1117@gmail.com",
+    "FROM_NAME": "Global Women Foundation & Band of Brothers",
+    "CLOUDCONVERT_API_KEY": "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiMWJiNmZmOTQ2YzdlYjY5YTg5OTJhMTIwOGI5M2NlYjIyMDczOGVhMDVjMGU3NjEyNDM2ZmU3YWJkN2E1YWNiODcxNmVhZmU3MWYyZDdkNTIiLCJpYXQiOjE3NzYyNTc0MjguNTM0NzQ0LCJuYmYiOjE3NzYyNTc0MjguNTM0NzQ1LCJleHAiOjQ5MzE5MzEwMjguNTI4MTEzLCJzdWIiOiI3NTEzNTkwOSIsInNjb3BlcyI6WyJ1c2VyLnJlYWQiLCJ1c2VyLndyaXRlIiwidGFzay5yZWFkIiwidGFzay53cml0ZSIsIndlYmhvb2sucmVhZCIsIndlYmhvb2sud3JpdGUiLCJwcmVzZXQucmVhZCIsInByZXNldC53cml0ZSJdfQ.QLRY0n0gZOJ3-ZgpquWo9GpAYqzZwPBuBvwSKuOc3Os_g62Bnpy9zEqGuXIIue_hr4Hj_0yf9pYf67rKpPI_rKUc1-vmVGbVPVXBYVPjFo-dAGa7E5DjaA0Yztkl2eOv3FRl0zfPD2uPDR0laK8Q-Y8h2lF_YTbX7VILjexQf8ajzrBQ5HoMccClQ_M4UbScZy2szkwq1afXricWMbDvmvpj1q4-AnuK46MLRsv2tgkrf1BXSS4spUUl5fj1zbj86gqEMf5Y9G2Mtrj3nzB_w_m_xTQhVSWAWv_CG61pJWyrboth9s27UiawWoWzyAjG31AZpJnrl7sKTe2XcylEeUzm7f-zJspGIdHeIn7BfIqxlIQsbtZYNKB-67QdjByvBddQ38-HWfkr0M97i5lBpjqNxAxi8OpbtmBgQUhNpvxAuGIzqi2FyqexPyLdeKeKjOoHdDRPFGJalrh2bIF8A4SKexRUHx7OBlxQFaVaQ4XncQ-wLJobS_M9PpZGnkcD7JZmroXxsImGCSlhg_7Gh7QgXpwC2_HU1bp8p8kKDyo0zm0qtxZ_Wc9CwW5FVDn7Dad9zHc23MBGIHUWqGEO9AgWfTrbV3NsqE1KXtO7VoTa6sbKeGKaoNrJsG-YuWCHH7wFxexvtXLuNDqw8IAODzMhkzBLlparsxwUhVjaYPA",
+    "USE_LOCAL_PPTX_CONVERSION": "false"
   }
 }

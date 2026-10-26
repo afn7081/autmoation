@@ -1,18 +1,15 @@
 """
 Generates a receipt PDF from format.docx template.
 
-Replaces custom fields (donor name, amount, date) and highlights them in yellow,
+Replaces custom fields (donor name, amount, date) preserving original formatting,
 then converts the filled DOCX to PDF.
 """
 
 import os
-import copy
 import uuid
 import subprocess
 import platform
 from docx import Document
-from docx.shared import RGBColor
-from docx.oxml.ns import qn
 
 # Placeholder values in format.docx that will be replaced
 PLACEHOLDERS = {
@@ -21,40 +18,11 @@ PLACEHOLDERS = {
     "March 27, 2026": "date",
 }
 
-HIGHLIGHT_COLOR = "yellow"  # Word highlight color name
-
-
-def set_highlight(run, color="yellow"):
-    """Apply a highlight color to a run element."""
-    # Map color names to Word highlight color IDs
-    color_map = {
-        "yellow": "7",
-        "green": "4",
-        "cyan": "5",
-        "magenta": "6",
-        "blue": "9",
-        "red": "10",
-        "darkBlue": "8",
-        "darkCyan": "3",
-        "darkGreen": "11",
-        "darkMagenta": "12",
-        "darkRed": "13",
-        "darkYellow": "14",
-        "lightGray": "15",
-        "black": "16",
-    }
-    rPr = run._element.get_or_add_rPr()
-    highlight = rPr.find(qn("w:highlight"))
-    if highlight is None:
-        highlight = copy.deepcopy(run._element.makeelement(qn("w:highlight"), {}))
-        rPr.append(highlight)
-    highlight.set(qn("w:val"), color)
-
 
 def replace_and_highlight(doc, placeholder, replacement):
     """
     Find placeholder text in paragraphs and replace it with the
-    replacement value, applying yellow highlight to the replaced text.
+    replacement value, preserving original formatting.
     """
     for paragraph in doc.paragraphs:
         full_text = paragraph.text
@@ -113,7 +81,6 @@ def _replace_in_paragraph(paragraph, placeholder, replacement):
             run = runs[run_idx]
             insert_pos = ph_start - start
             run.text = run.text[:insert_pos] + replacement + run.text[insert_pos:]
-            set_highlight(run, HIGHLIGHT_COLOR)
             break
 
 
@@ -173,7 +140,7 @@ def generate_receipt_pdf(template_path, output_dir, donor_name, amount, date):
     """
     Generate a personalized receipt PDF:
     1. Open format.docx template
-    2. Replace placeholders with actual values and highlight in yellow
+    2. Replace placeholders with actual values (preserving formatting)
     3. Convert to PDF
     """
     doc = Document(template_path)

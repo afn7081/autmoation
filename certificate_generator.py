@@ -5,18 +5,19 @@ Flow:
   1. Open the PPTX template
   2. Replace "Full Name" and date placeholder with donor-specific values
   3. Convert PPTX -> PNG. By default uses LibreOffice locally (no API limits).
-     Set USE_LOCAL_PPTX_CONVERSION=false to fall back to ConvertAPI.
+     Set USE_LOCAL_PPTX_CONVERSION=false to fall back to CloudConvert.
   4. Return the PNG bytes
 
 Env vars:
   - USE_LOCAL_PPTX_CONVERSION: "true" (default) or "false"
-  - CONVERTAPI_SECRET: required only when USE_LOCAL_PPTX_CONVERSION=false
+  - CLOUDCONVERT_API_KEY: required only when USE_LOCAL_PPTX_CONVERSION=false
 """
 
 import os
 import uuid
 import base64
 import shutil
+import time
 import logging
 import platform
 import tempfile
@@ -107,41 +108,74 @@ def _convert_pptx_to_png_local(pptx_path: str, work_dir: str) -> bytes:
         return f.read()
 
 
-def _convert_pptx_to_png_convertapi(pptx_path: str) -> bytes:
-    api_secret = os.getenv("CONVERTAPI_SECRET")
-    if not api_secret:
-        raise ValueError("CONVERTAPI_SECRET is required when USE_LOCAL_PPTX_CONVERSION=false")
+def _convert_pptx_to_png_cloudconvert(pptx_path: str) -> bytes:
+    """Convert a PPTX file to PNG bytes via CloudConvert.
 
+    Requires CLOUDCONVERT_API_KEY (a Bearer token) in the environment.
+    Creates a job with import-upload -> convert -> export-url tasks, uploads the
+    PPTX, polls until the job finishes, and downloads the resulting PNG.
+    """
+    api_key = os.getenv("CLOUDCONVERT_API_KEY")
+    if not api_key:
+        raise ValueError("CLOUDCONVERT_API_KEY is required when USE_LOCAL_PPTX_CONVERSION=false")
+
+    base_url = "https://api.cloudconvert.com/v2"
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    job_payload = {
+        "tasks": {
+            "import-pptx": {"operation": "import/upload"},
+            "convert-pptx": {
+                "operation": "convert",
+                "input": "import-pptx",
+                "input_format": "pptx",
+                "output_format": "png",
+            },
+            "export-png": {"operation": "export/url", "input": "convert-pptx"},
+        }
+    }
+
+    resp = requests.post(f"{base_url}/jobs", json=job_payload, headers=headers, timeout=60)
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"CloudConvert job create failed ({resp.status_code}): {resp.text}")
+    job = resp.json()["data"]
+    job_id = job["id"]
+
+    upload_task = next(t for t in job["tasks"] if t["name"] == "import-pptx")
+    form = upload_task["result"]["form"]
     with open(pptx_path, "rb") as f:
-        resp = requests.post(
-            f"https://v2.convertapi.com/convert/pptx/to/png?Secret={api_secret}&StoreFile=true",
-            files={"File": (
+        up = requests.post(
+            form["url"],
+            data=form["parameters"],
+            files={"file": (
                 "certificate.pptx",
                 f,
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )},
             timeout=120,
         )
+    if up.status_code not in (200, 201, 204):
+        raise RuntimeError(f"CloudConvert upload failed ({up.status_code}): {up.text}")
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"ConvertAPI failed ({resp.status_code}): {resp.text}")
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        s = requests.get(f"{base_url}/jobs/{job_id}", headers=headers, timeout=30)
+        s.raise_for_status()
+        data = s.json()["data"]
+        status = data["status"]
+        if status == "finished":
+            export_task = next(t for t in data["tasks"] if t["name"] == "export-png")
+            files = (export_task.get("result") or {}).get("files") or []
+            if not files:
+                raise RuntimeError(f"CloudConvert export returned no files: {export_task}")
+            r = requests.get(files[0]["url"], timeout=120)
+            r.raise_for_status()
+            return r.content
+        if status == "error":
+            raise RuntimeError(f"CloudConvert job error: {data}")
+        time.sleep(2)
 
-    result = resp.json()
-    files = result.get("Files") or result.get("files") or []
-    if not files:
-        raise RuntimeError(f"ConvertAPI returned no files: {result}")
-
-    first = files[0]
-    png_url = first.get("Url") or first.get("url") or first.get("FileUrl")
-    if png_url:
-        png_resp = requests.get(png_url, timeout=60)
-        png_resp.raise_for_status()
-        return png_resp.content
-
-    file_data = first.get("FileData") or first.get("fileData")
-    if not file_data:
-        raise RuntimeError(f"ConvertAPI response missing Url/FileData. Keys: {list(first.keys())}")
-    return base64.b64decode(file_data)
+    raise RuntimeError("CloudConvert job timed out after 180s")
 
 
 def generate_certificate_png(donor_name: str, date: str = "") -> bytes:
@@ -180,8 +214,8 @@ def generate_certificate_png(donor_name: str, date: str = "") -> bytes:
             logging.info("Converting PPTX->PNG locally via LibreOffice")
             png_bytes = _convert_pptx_to_png_local(pptx_out, work_dir)
         else:
-            logging.info("Converting PPTX->PNG via ConvertAPI")
-            png_bytes = _convert_pptx_to_png_convertapi(pptx_out)
+            logging.info("Converting PPTX->PNG via CloudConvert")
+            png_bytes = _convert_pptx_to_png_cloudconvert(pptx_out)
 
         logging.info(f"Certificate PNG generated ({len(png_bytes)} bytes)")
         return png_bytes

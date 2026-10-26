@@ -1,5 +1,5 @@
 """
-Sends personalized donation emails via SendGrid with PDF receipt attached.
+Sends personalized donation emails through Azure Communication Services Email.
 """
 
 import os
@@ -10,17 +10,8 @@ import zipfile
 import mimetypes
 
 import requests
+from azure.communication.email import EmailClient
 from docx import Document
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import (
-    Mail,
-    Attachment,
-    FileContent,
-    FileName,
-    FileType,
-    Disposition,
-    ContentId,
-)
 
 
 def _convert_svg_to_png_cloudconvert(svg_path: str) -> bytes:
@@ -114,7 +105,7 @@ def _shrink_png_for_email(png_bytes: bytes, max_width: int = 1200) -> bytes:
 def get_header_image():
     """Return (image_bytes, mime, filename) for the email header.
 
-    Prefers an SVG in the working directory (converted to PNG via ConvertAPI
+    Prefers an SVG in the working directory (converted to PNG via CloudConvert
     once, then resized + JPEG-compressed for email-friendly size, cached to
     disk). Falls back to None if no SVG is present.
     """
@@ -288,14 +279,15 @@ def read_email_template(template_path, donor_name):
 def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, amount_dollars=0, date=""):
     """
     Send a donation thank-you email with the receipt PDF attached.
-    For donations >= $1000, attaches a personalized certificate PNG from Canva.
+    For donations >= $2500, attaches a personalized certificate PNG from Canva.
     """
-    api_key = os.getenv("SENDGRID_API_KEY")
-    from_email = os.getenv("FROM_EMAIL", "info@gwfbob.org")
-    from_name = os.getenv("FROM_NAME", "Global Women Foundation & Band of Brothers")
+    connection_string = os.getenv("AZURE_COMMUNICATION_CONNECTION_STRING")
+    sender_address = os.getenv("AZURE_EMAIL_SENDER_ADDRESS") or os.getenv("FROM_EMAIL")
 
-    if not api_key:
-        raise ValueError("SENDGRID_API_KEY environment variable is not set")
+    if not connection_string:
+        raise ValueError("AZURE_COMMUNICATION_CONNECTION_STRING environment variable is not set")
+    if not sender_address:
+        raise ValueError("AZURE_EMAIL_SENDER_ADDRESS environment variable is not set")
 
     plain_text, html_content = read_email_template(template_path, donor_name)
 
@@ -328,9 +320,9 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
         header_html = ''
     html_content = html_content.replace('<!-- HEADER_IMAGE_PLACEHOLDER -->', header_html)
 
-    # Generate certificate for $1000+ donors and embed in email HTML
+    # Generate certificate for $2500+ donors and embed in email HTML
     cert_png = None
-    if amount_dollars >= 1000:
+    if amount_dollars >= 2500:
         logging.info(f"Generating certificate for ${amount_dollars} donation to {donor_name}")
         try:
             from certificate_generator import generate_certificate_png
@@ -349,68 +341,78 @@ def send_donation_email(template_path, to_email, donor_name, amount, pdf_path, a
 
     first_name = donor_name.split()[0] if donor_name else "Friend"
     subject = f"Thank You for Your Generous Donation, {first_name}!"
-
-    message = Mail(
-        from_email=(from_email, from_name),
-        to_emails=to_email,
-        subject=subject,
-        plain_text_content=plain_text,
-        html_content=html_content,
-    )
+    attachments = []
 
     # Attach the PDF receipt
     if pdf_path and os.path.exists(pdf_path):
         with open(pdf_path, "rb") as f:
             pdf_data = f.read()
 
-        encoded_pdf = base64.b64encode(pdf_data).decode()
-        attachment = Attachment(
-            FileContent(encoded_pdf),
-            FileName("Donation_Receipt.pdf"),
-            FileType("application/pdf"),
-            Disposition("attachment"),
-        )
-        message.add_attachment(attachment)
+        attachments.append({
+            "name": "Donation_Receipt.pdf",
+            "contentType": "application/pdf",
+            "contentInBase64": base64.b64encode(pdf_data).decode(),
+        })
 
     # Attach header image inline (referenced by cid:header_image above)
     if header_bytes:
-        encoded_header = base64.b64encode(header_bytes).decode()
         header_ext = "jpg" if header_mime == "image/jpeg" else "png"
-        header_attachment = Attachment(
-            FileContent(encoded_header),
-            FileName(f"header.{header_ext}"),
-            FileType(header_mime),
-            Disposition("inline"),
-            ContentId("header_image"),
-        )
-        message.add_attachment(header_attachment)
+        attachments.append({
+            "name": f"header.{header_ext}",
+            "contentType": header_mime,
+            "contentInBase64": base64.b64encode(header_bytes).decode(),
+            "contentId": "header_image",
+        })
 
-    # Attach certificate inline + as download for $1000+ donors
+    # Attach certificate inline + as download for $2500+ donors
     if cert_png:
         encoded_cert = base64.b64encode(cert_png).decode()
 
-        # Inline image referenced by cid:certificate_image
-        inline_attachment = Attachment(
-            FileContent(encoded_cert),
-            FileName("certificate.png"),
-            FileType("image/png"),
-            Disposition("inline"),
-            ContentId("certificate_image"),
-        )
-        message.add_attachment(inline_attachment)
-
-        # Also attach as downloadable file
-        dl_attachment = Attachment(
-            FileContent(encoded_cert),
-            FileName("Certificate_of_Recognition.png"),
-            FileType("image/png"),
-            Disposition("attachment"),
-        )
-        message.add_attachment(dl_attachment)
+        attachments.append({
+            "name": "certificate.png",
+            "contentType": "image/png",
+            "contentInBase64": encoded_cert,
+            "contentId": "certificate_image",
+        })
+        attachments.append({
+            "name": "Certificate_of_Recognition.png",
+            "contentType": "image/png",
+            "contentInBase64": encoded_cert,
+        })
 
         logging.info("Certificate embedded and attached successfully")
 
-    sg = SendGridAPIClient(api_key)
-    response = sg.send(message)
+    message = {
+        "senderAddress": sender_address,
+        "recipients": {
+            "to": [{
+                "address": to_email,
+                "displayName": donor_name,
+            }]
+        },
+        "content": {
+            "subject": subject,
+            "plainText": plain_text,
+            "html": html_content,
+        },
+    }
+    if attachments:
+        message["attachments"] = attachments
 
-    return response.status_code
+    client = EmailClient.from_connection_string(connection_string)
+    try:
+        result = client.begin_send(message).result()
+    finally:
+        client.close()
+
+    if result.get("status") != "Succeeded":
+        raise RuntimeError(
+            f"Azure Communication Services email send failed: "
+            f"{result.get('error') or result}"
+        )
+
+    logging.info(
+        "Azure Communication Services accepted email "
+        f"(operation_id={result.get('id', 'unknown')})"
+    )
+    return result["status"]

@@ -33,7 +33,7 @@ az deployment group create \
   --parameters @azuredeploy.parameters.example.json \
   --parameters stripeSecretKey='sk_test_...' \
                stripeWebhookSecret='whsec_...' \
-               sendgridApiKey='SG....'
+               azureCommunicationConnectionString='endpoint=https://...;accesskey=...'
 ```
 
 ## After the first deploy
@@ -62,9 +62,9 @@ az containerapp update -g donations-rg -n donations-app \
 | `location` | no | Defaults to the resource group's region. |
 | `acrName` / `storageAccountName` | no | Auto-generated unique names if omitted. |
 | `containerImage` | no | Replace with your ACR image after first push. |
-| `stripeSecretKey`, `stripeWebhookSecret`, `sendgridApiKey` | **yes** | App will not function without these. |
-| `cloudconvertApiKey`, `convertapiSecret` | optional | Only needed for PDF/PPTX conversion features. |
-| `fromEmail`, `fromName` | yes | Sender identity used by SendGrid. |
+| `stripeSecretKey`, `stripeWebhookSecret`, `azureCommunicationConnectionString` | **yes** | App will not function without these. |
+| `cloudconvertApiKey` | optional | Used for SVG→PNG and PPTX→PNG conversion. |
+| `fromEmail` | yes | MailFrom address from the linked Azure Email Communication Services domain. |
 | `cpu`, `memory`, `minReplicas`, `maxReplicas` | no | Container App sizing. |
 
 ## Outputs

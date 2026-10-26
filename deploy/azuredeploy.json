@@ -82,28 +82,20 @@
       "defaultValue": "",
       "metadata": { "description": "Stripe webhook signing secret (whsec_...)" }
     },
-    "sendgridApiKey": {
+    "azureCommunicationConnectionString": {
       "type": "securestring",
       "defaultValue": "",
-      "metadata": { "description": "SendGrid API key (SG.xxxx)" }
+      "metadata": { "description": "Azure Communication Services connection string." }
     },
     "fromEmail": {
       "type": "string",
-      "defaultValue": "donations@example.org"
-    },
-    "fromName": {
-      "type": "string",
-      "defaultValue": "Donations"
+      "defaultValue": "donotreply@example.azurecomm.net",
+      "metadata": { "description": "MailFrom address from the linked Azure Email Communication Services domain." }
     },
     "cloudconvertApiKey": {
       "type": "securestring",
       "defaultValue": "",
-      "metadata": { "description": "CloudConvert API key (JWT). Optional." }
-    },
-    "convertapiSecret": {
-      "type": "securestring",
-      "defaultValue": "",
-      "metadata": { "description": "ConvertAPI secret. Optional." }
+      "metadata": { "description": "CloudConvert API key (JWT). Used for SVG→PNG and PPTX→PNG conversion. Optional." }
     }
   },
   "variables": {
@@ -217,9 +209,8 @@
             { "name": "acr-password", "value": "[listCredentials(resourceId('Microsoft.ContainerRegistry/registries', parameters('acrName')), '2023-07-01').passwords[0].value]" },
             { "name": "stripe-secret-key", "value": "[parameters('stripeSecretKey')]" },
             { "name": "stripe-webhook-secret", "value": "[parameters('stripeWebhookSecret')]" },
-            { "name": "sendgrid-api-key", "value": "[parameters('sendgridApiKey')]" },
+            { "name": "azure-communication-connection-string", "value": "[parameters('azureCommunicationConnectionString')]" },
             { "name": "cloudconvert-api-key", "value": "[parameters('cloudconvertApiKey')]" },
-            { "name": "convertapi-secret", "value": "[parameters('convertapiSecret')]" },
             { "name": "storage-connection-string", "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', parameters('storageAccountName'), ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01').keys[0].value, ';EndpointSuffix=core.windows.net')]" }
           ],
           "registries": [
@@ -242,11 +233,9 @@
               "env": [
                 { "name": "STRIPE_SECRET_KEY", "secretRef": "stripe-secret-key" },
                 { "name": "STRIPE_WEBHOOK_SECRET", "secretRef": "stripe-webhook-secret" },
-                { "name": "SENDGRID_API_KEY", "secretRef": "sendgrid-api-key" },
-                { "name": "FROM_EMAIL", "value": "[parameters('fromEmail')]" },
-                { "name": "FROM_NAME", "value": "[parameters('fromName')]" },
+                { "name": "AZURE_COMMUNICATION_CONNECTION_STRING", "secretRef": "azure-communication-connection-string" },
+                { "name": "AZURE_EMAIL_SENDER_ADDRESS", "value": "[parameters('fromEmail')]" },
                 { "name": "CLOUDCONVERT_API_KEY", "secretRef": "cloudconvert-api-key" },
-                { "name": "CONVERTAPI_SECRET", "secretRef": "convertapi-secret" },
                 { "name": "AZURE_STORAGE_CONNECTION_STRING", "secretRef": "storage-connection-string" },
                 { "name": "AZURE_STORAGE_CONTAINER", "value": "[parameters('templatesContainerName')]" }
               ]

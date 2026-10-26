@@ -23,8 +23,8 @@ GENERAL_EMAIL_BLOB = "General Email Template.docx"
 DONOR_ABOVE_1000_BLOB = "Email Template for Donors above $1000.docx"
 FORMAT_BLOB = "format.docx"
 
-# ── Idempotency: dedupe by payment_intent_id across retries/restarts ─────────
-_PROCESSED_PI_FILE = os.path.join(tempfile.gettempdir(), "processed_payment_intents.txt")
+# ── Idempotency: dedupe by charge_id across retries/restarts ─────────────────
+_PROCESSED_PI_FILE = os.path.join(tempfile.gettempdir(), "processed_charges.txt")
 _PROCESSED_LOCK = threading.Lock()
 
 
@@ -56,53 +56,32 @@ def format_date(timestamp):
     return dt.strftime("%B %d, %Y")
 
 
-def extract_donor_info(payment_intent):
-    """Extract donor name, email, amount, and date from a Stripe PaymentIntent."""
-    charges = payment_intent.get("charges", {}).get("data", [])
-    latest_charge = payment_intent.get("latest_charge")
+def _custom_field_value(custom_fields, key):
+    """Return the text value of a checkout custom field by key, if present."""
+    for field in custom_fields or []:
+        if field.get("key") == key:
+            return (field.get("text") or {}).get("value")
+    return None
 
-    name = "Valued Donor"
-    email = None
 
-    if charges:
-        charge = charges[0]
-        billing = charge.get("billing_details", {})
-        name = billing.get("name") or name
-        email = billing.get("email") or charge.get("receipt_email")
-    elif isinstance(latest_charge, dict):
-        billing = latest_charge.get("billing_details", {})
-        name = billing.get("name") or name
-        email = billing.get("email") or latest_charge.get("receipt_email")
-    elif isinstance(latest_charge, str) and latest_charge.startswith("ch_"):
-        try:
-            charge = stripe.Charge.retrieve(latest_charge)
-            billing = charge.get("billing_details", {})
-            name = billing.get("name") or name
-            email = billing.get("email") or charge.get("receipt_email")
-        except Exception:
-            pass
+def extract_donor_info(session):
+    """Extract donor name, email, amount, and date from a Checkout Session object."""
+    custom_fields = session.get("custom_fields", [])
+    first_name = _custom_field_value(custom_fields, "firstname")
+    last_name = _custom_field_value(custom_fields, "lastname")
 
-    # Check metadata for donor name (useful for test payments)
-    metadata = payment_intent.get("metadata", {})
-    if name == "Valued Donor" and metadata.get("donor_name"):
-        name = metadata["donor_name"]
+    name = " ".join(part for part in [first_name, last_name] if part).strip()
 
-    if not email:
-        email = payment_intent.get("receipt_email")
+    customer_details = session.get("customer_details") or {}
 
-    if not email:
-        customer_id = payment_intent.get("customer")
-        if customer_id:
-            try:
-                customer = stripe.Customer.retrieve(customer_id)
-                email = customer.get("email")
-                if name == "Valued Donor":
-                    name = customer.get("name") or name
-            except Exception:
-                pass
+    # Fallback to the name collected by Stripe if custom fields are empty
+    if not name:
+        name = customer_details.get("name") or "Valued Donor"
 
-    amount_cents = payment_intent.get("amount", 0)
-    created = payment_intent.get("created", int(datetime.now(timezone.utc).timestamp()))
+    email = customer_details.get("email") or session.get("customer_email")
+
+    amount_cents = session.get("amount_total", 0)
+    created = session.get("created", int(datetime.now(timezone.utc).timestamp()))
 
     return {
         "name": name,
@@ -113,14 +92,15 @@ def extract_donor_info(payment_intent):
     }
 
 
-def handle_successful_payment(payment_intent, event_id="unknown"):
-    """Process a successful payment: generate PDF receipt and send email."""
-    pi_id = payment_intent.get("id", "unknown")
-    donor = extract_donor_info(payment_intent)
+def handle_successful_payment(session, event_id="unknown"):
+    """Process a completed checkout session: generate PDF receipt and send email."""
+    session_id = session.get("id", "unknown")
+    donor = extract_donor_info(session)
 
-    log_prefix = f"[evt={event_id}][pi={pi_id}]"
+    log_prefix = f"[evt={event_id}][session={session_id}]"
 
     if not donor["email"]:
+        print(f"{log_prefix} No email found. Skipping.", flush=True)
         logging.warning(f"{log_prefix} No email found. Skipping.")
         return
 
@@ -130,10 +110,11 @@ def handle_successful_payment(payment_intent, event_id="unknown"):
         f"{log_prefix} Processing: donor={donor['name']}, "
         f"email={donor['email']}, amount=${amount_dollars:.2f}"
     )
+    print(f"{log_prefix} Processing: donor={donor['name']}, email={donor['email']}, amount=${amount_dollars:.2f}", flush=True)
 
-    if amount_dollars >= 1000:
+    if amount_dollars >= 2500:
         email_template_path = get_asset(DONOR_ABOVE_1000_BLOB)
-        logging.info(f"{log_prefix} Using $1000+ template with certificate")
+        logging.info(f"{log_prefix} Using $2500+ template with certificate")
     else:
         email_template_path = get_asset(GENERAL_EMAIL_BLOB)
 
@@ -182,31 +163,29 @@ def stripe_webhook(req: func.HttpRequest) -> func.HttpResponse:
     event_type = event["type"]
     logging.info(f"[evt={event_id}] Received {event_type}")
 
-    if event_type == "payment_intent.succeeded":
-        pi = event["data"]["object"]
-        pi_id = pi.get("id", "")
+    if event_type == "checkout.session.completed":
+        session = event["data"]["object"]
+        session_id = session.get("id", "")
 
-        if _already_processed(pi_id):
-            logging.info(f"[evt={event_id}][pi={pi_id}] Already processed, skipping (dedup)")
+        # Only process fully paid sessions
+        if session.get("payment_status") != "paid":
+            logging.info(f"[evt={event_id}][session={session_id}] Not paid (status={session.get('payment_status')}), skipping")
+            return func.HttpResponse(json.dumps({"status": "ignored"}), status_code=200)
+
+        if _already_processed(session_id):
+            logging.info(f"[evt={event_id}][session={session_id}] Already processed, skipping (dedup)")
             return func.HttpResponse(json.dumps({"status": "duplicate"}), status_code=200)
 
         # Mark BEFORE processing so concurrent retries also see it
-        _mark_processed(pi_id)
+        _mark_processed(session_id)
 
-        # Process asynchronously so we can ACK Stripe within its ~30s timeout.
-        # The heavy work (PDF + certificate generation + SVG->PNG conversion +
-        # SendGrid send) can take longer than Stripe is willing to wait, which
-        # caused "context deadline exceeded" timeouts and unnecessary retries.
-        def _process_async(pi=pi, event_id=event_id):
-            try:
-                handle_successful_payment(pi, event_id)
-            except Exception as e:
-                logging.exception(f"[evt={event_id}] Async processing failed: {e}")
-
-        threading.Thread(
-            target=_process_async, name=f"webhook-{pi_id}", daemon=True
-        ).start()
-        logging.info(f"[evt={event_id}][pi={pi_id}] Dispatched to background worker")
+        # Process synchronously — PDF/certificate generation and email delivery.
+        try:
+            handle_successful_payment(session, event_id)
+            logging.info(f"[evt={event_id}][session={session_id}] Processing completed successfully")
+        except Exception as e:
+            logging.exception(f"[evt={event_id}][session={session_id}] Processing failed: {e}")
+            return func.HttpResponse(json.dumps({"error": str(e)}), status_code=500)
 
     return func.HttpResponse(json.dumps({"status": "ok"}), status_code=200)
 
